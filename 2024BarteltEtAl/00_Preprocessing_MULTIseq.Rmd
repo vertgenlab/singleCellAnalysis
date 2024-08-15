@@ -222,8 +222,7 @@ library(mgsub)
 ```
 
 ```{r}
-# Try to add final.calls to metadata
-# Changing bar names to match genotypes using export to excel and find/replace
+# Generate named vectors to add to Seurat metadata with animal IDs, genotype, and sex
 final.calls.8.5wk
 
 final.calls.8wk.animal <- mgsub(final.calls.8.5wk, pattern = c("Bar9", "Bar10", "Bar11", "Bar12", "Bar13", "Bar14", "Bar15", "Bar16"), replacement = c("WT_M1_8wk", "SCA7_M1_8wk", "WT_F1_8wk", "SCA7_F1_8wk", "WT_M2_8wk", "SCA7_M2_8wk", "WT_F2_8wk", "SCA7_F2_8wk"))
@@ -232,7 +231,6 @@ final.calls.8.5wk.animal
 final.calls.8.5wk.type <- mgsub(final.calls.8.5wk, pattern = c("WT_M1_8wk", "SCA7_M1_8wk", "WT_F1_8wk", "SCA7_F1_8wk", "WT_M2_8wk", "SCA7_M2_8wk", "WT_F2_8wk", "SCA7_F2_8wk"), replacement = c("WT", "SCA7", "WT", "SCA7", "WT", "SCA7", "WT", "SCA7"))
 
 final.calls.8.5wk.sex <- mgsub(final.calls.8.5wk, pattern = c("WT_M1_8wk", "SCA7_M1_8wk", "WT_F1_8wk", "SCA7_F1_8wk", "WT_M2_8wk", "SCA7_M2_8wk", "WT_F2_8wk", "SCA7_F2_8wk"), replacement = c("Male", "Male", "Female", "Female", "Male", "Male", "Female", "Female"))
-
 ```
 
 ```{r}
@@ -242,7 +240,7 @@ SCA7.8wk.unfiltered.test <- AddMetaData(object = SCA7.8wk.unfiltered.test, metad
 
 SCA7.8wk.unfiltered.test@meta.data # Looks good!
 
-#Modifying real deal
+# Modify actual Seruat object
 SCA7.8wk.unfiltered <- AddMetaData(object = SCA7.8wk.unfiltered, metadata = final.calls.8.5wk, col.name = 'MULTIseq_group')
 SCA7.8wk.unfiltered <- AddMetaData(object = SCA7.8wk.unfiltered, metadata = final.calls.8.5wk.type, col.name = 'Type')
 SCA7.8wk.unfiltered <- AddMetaData(object = SCA7.8wk.unfiltered, metadata = final.calls.8.5wk.sex, col.name = 'sex')
@@ -252,8 +250,9 @@ table(SCA7.8wk.unfiltered@meta.data$MULTIseq_group)
 ```
 
 ```{r}
-# Remove doublets and NAs
+# Remove doublets and negatives
 SCA7.8wk.nodubs <- subset(SCA7.8wk.unfiltered, subset = MULTIseq_group != "Doublet")
+SCA7.8wk.nodubs <- subset(SCA7.8wk.nodubs, subset = MULTIseq_group != "Negative")
 SCA7.8wk.nodubs@meta.data
 ```
 
