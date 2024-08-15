@@ -1,0 +1,237 @@
+---
+title: "Bartelt 2024 Seurat Analysis Code"
+output: html_notebook
+---
+
+```{r}
+# Load Libraries
+library(BiocManager)
+library(Seurat)
+library(tidyr)
+library(dplyr)
+library(patchwork)
+library(ggplot2)
+library(ggeasy)
+```
+
+```{r}
+# read in annotated Seurat file (change path to download location)
+SCA7.8wk.cleaned <- readRDS(file = "~/Desktop/Projects/La_Spada/SCA7/snRNA-seq/Seurat/Objects/SCA7.8wk.cleaned.rds")
+```
+
+```{r}
+# view metadata for annotation categories
+SCA7.8wk.cleaned@meta.data
+
+# view UMAP clusters, grouped by genotype
+DimPlot(SCA7.8wk.cleaned)
+DimPlot(SCA7.8wk.cleaned, group.by = "Type")
+```
+
+```{r}
+# QC plots
+VlnPlot(SCA7.8wk.cleaned, features = c("nFeature_RNA","nCount_RNA","percent.mt"), split.by = "Type", pt.size = 0.01)
+
+# Grouped Celltype Split by genotype ("Type")
+VlnPlot(SCA7.8wk.cleaned, features = c("nFeature_RNA"), split.by = "Type", pt.size = 0.01)
+VlnPlot(SCA7.8wk.cleaned, features = c("nCount_RNA"), split.by = "Type", pt.size = 0.01)
+VlnPlot(SCA7.8wk.cleaned, features = c("percent.mt"), split.by = "Type", pt.size = 0.01)
+
+# Grouped by Sex and Type (genotype)
+VlnPlot(SCA7.8wk.cleaned, features = c("nFeature_RNA"), group.by = "Sex", split.by = "Type", pt.size = 0.01)
+VlnPlot(SCA7.8wk.cleaned, features = c("nCount_RNA"), group.by = "Sex", split.by = "Type", pt.size = 0.01)
+VlnPlot(SCA7.8wk.cleaned, features = c("percent.mt"), group.by = "Sex", split.by = "Type", pt.size = 0.01)
+```
+
+```{r}
+# Calculate dataset QC metrics
+SCA7.8wk.cleaned@meta.data[,2] %>% median() # median UMI = 3694
+SCA7.8wk.cleaned@meta.data[,3] %>% median() # median genes = 1661
+SCA7.8wk.cleaned@meta.data[,4] %>% median() # median percent.mt = 0.0167%
+```
+
+```{r}
+# Calculate QC metrics by genotype
+
+# example for comparing RNA counts in Purkinje cells for WT vs. SCA7
+WT.counts <- FetchData(SCA7.8wk.cleaned, vars = "nCount_RNA", cells = names(SCA7.8wk.cleaned$nCount_RNA)[which(SCA7.8wk.cleaned@active.ident=="Purkinje cells" & SCA7.8wk.cleaned$Type=="WT")])
+
+SCA7.counts <- FetchData(SCA7.8wk.cleaned, vars = "nCount_RNA", cells = names(SCA7.8wk.cleaned$nCount_RNA)[which(SCA7.8wk.cleaned@active.ident=="Purkinje cells" & SCA7.8wk.cleaned$Type=="SCA7")])
+
+# compute statistical significance with Wilcoxon rank sum test
+test <- wilcox.test(WT.counts$nCount_RNA, SCA7.counts$nCount_RNA)
+test
+test$p.value # 6.207e-36 p-value
+
+WT.counts$nCount_RNA %>% median() # WT median: 11,187
+SCA7.counts$nCount_RNA %>% median() # SCA7 median: 8,645
+
+# loop over all cell types
+celltypes <- Idents(SCA7.8wk.cleaned) %>% unique()
+
+WT.median <- vector()
+SCA7.median <- vector()
+wilcox.p <- vector()
+
+for (i in 1:13){
+  # extract counts
+  WT.counts <- FetchData(SCA7.8wk.cleaned, vars = "nCount_RNA", cells = names(SCA7.8wk.cleaned$nCount_RNA)[which(SCA7.8wk.cleaned@active.ident==celltypes[i] & SCA7.8wk.cleaned$Type=="WT")])
+
+  SCA7.counts <- FetchData(SCA7.8wk.cleaned, vars = "nCount_RNA", cells = names(SCA7.8wk.cleaned$nCount_RNA)[which(SCA7.8wk.cleaned@active.ident==celltypes[i] & SCA7.8wk.cleaned$Type=="SCA7")])
+
+  # compute statistical significance with Wilcoxon rank sum test
+  test <- wilcox.test(WT.counts$nCount_RNA, SCA7.counts$nCount_RNA)
+
+  wilcox.p[i] <- test$p.value * 13 # multiply p-values by 13 for multiple testing
+
+  WT.median[i] <- WT.counts$nCount_RNA %>% median() # WT median: 11,187
+  SCA7.median[i] <- SCA7.counts$nCount_RNA %>% median() # SCA7 median: 8,645
+}
+
+# assemble into dataframe
+data.frame("celltypes" = celltypes, "WT.median.UMI" = WT.median, "SCA7.median.UMI" = SCA7.median, "Wilcox.padj" = wilcox.p)
+```
+
+```{r}
+# Calculate cell type abundance by genotype and animal
+
+# by genotype
+cluster.numbers.type.8wk <- table(Idents(SCA7.8wk.cleaned),SCA7.8wk.cleaned$Type)
+cluster.numbers.type.8wk
+
+# by animal
+cluster.numbers.animal.8wk <- table(Idents(SCA7.8wk.cleaned),SCA7.8wk.cleaned$MULTIseq_group)
+cluster.numbers.animal.8wk
+
+# calculate statistical significance for each celltype with t-test
+p.values <- vector()
+
+for (i in 1:13){
+  t <- t.test(cluster.numbers.animal.8wk[i,1:4], cluster.numbers.animal.8wk[i,5:8], paired = F, var.equal = T)
+  p.values[i] <- t$p.value * 13 # multiply p-values by 13 for multiple test correction
+}
+
+p.values # no p-values below 0.05
+```
+
+```{r}
+# perform deeper analysis by reclustering single cell type
+# example for Purkinje cells
+PC.8wk <- subset(SCA7.8wk.cleaned, idents = "Purkinje cells")
+```
+```{r}
+# normalize, find variable feature, scale
+PC.8wk <- NormalizeData(PC.8wk, normalization.method = "LogNormalize", scale.factor = 10000)
+PC.8wk <- FindVariableFeatures(PC.8wk, selection.method = "vst", nfeatures = 2000)
+
+PC.genes <- rownames(PC.8wk)
+PC.8wk <- ScaleData(PC.8wk, features = PC.genes)
+
+# run PCA
+PC.8wk <- RunPCA(PC.8wk, features = VariableFeatures(object = PC.8wk))
+```
+```{r}
+# visualize PCs
+PC.8wk <- JackStraw(PC.8wk, num.replicate = 100)
+PC.8wk <- ScoreJackStraw(PC.8wk, dims = 1:15)
+
+JackStrawPlot(PC.8wk, dims = 1:15)
+```
+
+```{r}
+ElbowPlot(PC.8wk)
+```
+
+```{r}
+# cluster with 12 PCs
+PC.8wk <- FindNeighbors(PC.8wk, dims = 1:12)
+PC.8wk <- FindClusters(PC.8wk, resolution =0.8)
+
+PC.8wk <- RunUMAP(PC.8wk, dims = 1:12)
+```
+
+```{r}
+DimPlot(PC.8wk, label = TRUE)
+DimPlot(PC.8wk, label = TRUE, group.by = "Type")
+```
+
+```{r}
+# investigate genes of interest
+FeaturePlot(PC.8wk, features = "Aldoc")# less Aldoc expression in SCA7, no real observable gradient
+FeaturePlot(PC.8wk, features = "Plcb4") # opposite gradient to Aldoc; SCA7 maintains good expression, but no increase to suggest a bias toward Plcb4+
+FeaturePlot(PC.8wk, features = "Cux2")
+FeaturePlot(PC.8wk, features = "Grin2a")
+
+VlnPlot(PC.8wk, features = "Aldoc", group.by = "Type", pt.size = 0.1, y.max = 5)
+```
+
+```{r}
+# investigate top DEGs
+# note this is using normalized counts and no biological replicates
+# good for initial look, but use pseudobulk DEseq2 notebook for full accurate DEG analysis
+# DE by genotype for PCs (ALL WT vs. ALL SCA7)
+PC.WT.8wk.cells <- names(which(PC.8wk$Type == "WT"))
+PC.SCA7.8wk.cells <- names(which(PC.8wk$Type == "SCA7"))
+
+PC.WT.vs.SCA7.8wk <- FindMarkers(PC.8wk, ident.1 = PC.SCA7.8wk.cells, ident.2 = PC.WT.8wk.cells)
+PC.WT.vs.SCA7.8wk
+```
+
+```{r}
+# subset further, WT only to investigate healthy Zebrin subtype genes
+PC.WT.8wk <- subset(PC.8wk, cells = PC.WT.8wk.cells)
+
+PC.WT.8wk <- NormalizeData(PC.WT.8wk, normalization.method = "LogNormalize", scale.factor = 10000)
+
+PC.WT.8wk <- FindVariableFeatures(PC.WT.8wk, selection.method = "vst", nfeatures = 2000)
+
+PC.wt.genes <- rownames(PC.WT.8wk)
+PC.WT.8wk <- ScaleData(PC.WT.8wk, features = PC.wt.genes)
+
+PC.WT.8wk <- RunPCA(PC.WT.8wk, features = VariableFeatures(object = PC.WT.8wk))
+
+PC.WT.8wk <- JackStraw(PC.WT.8wk, num.replicate = 100)
+PC.WT.8wk <- ScoreJackStraw(PC.WT.8wk, dims = 1:15)
+
+JackStrawPlot(PC.WT.8wk, dims = 1:15)
+ElbowPlot(PC.WT.8wk)
+```
+
+```{r}
+PC.WT.8wk <- FindNeighbors(PC.WT.8wk, dims = 1:12)
+PC.WT.8wk <- FindClusters(PC.WT.8wk, resolution =1)
+
+PC.WT.8wk <- RunUMAP(PC.WT.8wk, dims = 1:12)
+```
+
+```{r}
+DimPlot(PC.WT.8wk, label = TRUE)
+```
+
+```{r}
+# identify Zebrin-positive and negative clusters
+FeaturePlot(PC.WT.8wk, features = "Aldoc")
+FeaturePlot(PC.WT.8wk, features = "Plcb4")
+
+VlnPlot(PC.WT.8wk, features = "Aldoc")
+VlnPlot(PC.WT.8wk, features = "Plcb4")
+
+# match cluster numbers to your object based on expression levels
+Aldoc.high <- c(4,6,7,9,2,5)
+Aldoc.low <- c(0,1,3,8)
+
+# calculate Aldoc-axis (Zebrin-subtype) DEGs
+# note: log-normalized DEG analysis here is fine since no SCA7 cells and no global read count differences 
+Aldoc.axis <- FindMarkers(PC.WT.8wk, ident.1 = Aldoc.high, ident.2 = Aldoc.low, logfc.threshold = 0)
+Aldoc.axis # 359 significant genes
+```
+
+```{r}
+# retrieve cellIDs for WT Aldoc identity
+WT.Aldoc.pos.cells <- WhichCells(PC.WT.8wk, idents = Aldoc.high)
+WT.Aldoc.neg.cells <- WhichCells(PC.WT.8wk, idents = Aldoc.low)
+
+# repeat subclustering process and Zebrin subtype classification for SCA7 cells
+# now can compute SCA7 DEGs between specific Zebrin subtypes
+```
+

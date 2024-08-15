@@ -1,0 +1,346 @@
+---
+title: "00_Preprocessing_MULTIseq_assignment"
+output: html_notebook
+---
+
+```{r}
+library(BiocManager)
+library(Seurat)
+library(tidyr)
+library(dplyr)
+library(patchwork)
+library(ggplot2)
+library(tibble)
+```
+
+```{r}
+# Load in data
+SCA7_8wk_data <- Read10X(data.dir = "~/path_to/filtered_feature_bc_matrix_8_5wk/")
+
+SCA7.8wk.unfiltered <- CreateSeuratObject(counts = SCA7_8wk_data, project = "SCA7_Cb_8wk", min.cells = 3, min.features = 200, assay = "RNA")
+
+SCA7.8wk.unfiltered
+```
+
+```{r}
+# add mitochondrial read percentage and view raw QC stats
+SCA7.8wk.unfiltered[["percent.mt"]] <- PercentageFeatureSet(SCA7.8wk.unfiltered, pattern = "^mt-")
+
+VlnPlot(SCA7.8wk.unfiltered, features = c("nFeature_RNA", "nCount_RNA", "percent.mt"), ncol = 3, pt.size = 0)
+```
+
+```{r}
+# normalize, find variable features, and scale data
+SCA7.8wk.unfiltered <- NormalizeData(SCA7.8wk.unfiltered, normalization.method = "LogNormalize", scale.factor = 10000)
+SCA7.8wk.unfiltered <- FindVariableFeatures(SCA7.8wk.unfiltered, selection.method = "vst", nfeatures = 3000)
+
+all.genes <- rownames(SCA7.8wk.unfiltered)
+SCA7.8wk.unfiltered <- ScaleData(SCA7.8wk.unfiltered, features = all.genes)
+```
+
+```{r}
+# run PCA
+SCA7.8wk.unfiltered <- RunPCA(SCA7.8wk.unfiltered, features = VariableFeatures(object = SCA7.8wk.unfiltered))
+```
+
+```{r}
+# run JackStraw to visualize PC significance
+SCA7.8wk.unfiltered <- JackStraw(SCA7.8wk.unfiltered, num.replicate = 100)
+SCA7.8wk.unfiltered <- ScoreJackStraw(SCA7.8wk.unfiltered, dims = 1:20)
+```
+
+```{r}
+JackStrawPlot(SCA7.8wk.unfiltered, dims = 1:20)
+```
+
+```{r}
+# view elbow plot to select number of PCs to include for clustering
+ElbowPlot(SCA7.8wk.unfiltered)
+```
+
+```{r}
+# cluster with 17 PCs
+SCA7.8wk.unfiltered <- FindNeighbors(SCA7.8wk.unfiltered, dims = 1:17)
+SCA7.8wk.unfiltered <- FindClusters(SCA7.8wk.unfiltered, resolution =0.8)
+SCA7.8wk.unfiltered <- RunUMAP(SCA7.8wk.unfiltered, dims = 1:17)
+```
+
+```{r}
+# visualize UMAP
+DimPlot(SCA7.8wk.unfiltered, reduction = "umap")
+```
+
+```{r}
+# Extract cell barcodes for MULTI-seq analysis
+SCA7_8_5wk_cell_barcodes <- WhichCells(SCA7.8wk.unfiltered)
+
+write.csv(SCA7_8_5wk_cell_barcodes, file = "~/MULTIseq-analysis-directory/SCA7_8_5wk_cell_barcodes.csv")
+```
+
+Perform MULTI-seq Barcode Classification following instructions in GitHub
+https://github.com/chris-mcginnis-ucsf/MULTI-seq
+
+```{r}
+devtools::install_github('chris-mcginnis-ucsf/MULTI-seq')
+BiocManager::install("ShortRead")
+```
+
+```{r}
+library(deMULTIplex)
+library(KernSmooth)
+library(reshape2)
+library(stringdist)
+library(ShortRead)
+library(Rtsne)
+```
+
+```{r}
+# Create bar.ref which tells which MULTI-seq barcode matches each sequence string (these are specific to the oligos used for multiplexing)
+bar.ref <- read.csv("~/path-to/MULTI-seq-barcodes.csv", colClasses = "character")
+bar.ref <- unlist(bar.ref, use.names = FALSE)
+str(bar.ref)
+typeof(bar.ref)
+```
+
+```{r}
+# run MULTIseq preprocessing to match MULTIseq barcode reads with CellBarcode IDs
+# note: this is a very memory heavy step, I had to run this on compute cluster with 256Gb memory
+readTable_8_5wk <- MULTIseq.preProcess(R1 = "/path-to-MULTIseq-fastq-R1/S2_S2_R1_001.fastq.gz", R2 = "/path-to-MULTIseq-fastq-R2/S2_S2_R2_001.fastq.gz", cellIDs = SCA7_8_5wk_cell_barcodes, cell=c(1,16), umi=c(17,26), tag=c(1,8))
+```
+
+```{r}
+# Visualize bar tables in TSNE space
+bar.tsne.8.5wk <- barTSNE(bar_table_8_5wk[,1:24])
+
+pdf("bc.check.8.5wk.pdf")
+for (i in 3:ncol(bar.tsne.8.5wk)) {
+    g <- ggplot(bar.tsne.8.5wk, aes(x = TSNE1, y = TSNE2, color = bar.tsne.8.5wk[,i])) +
+    geom_point() +
+    scale_color_gradient(low = "black", high = "red") +
+    ggtitle(colnames(bar.tsne.8.5wk)[i]) +
+    theme(legend.position = "none") 
+    print(g)
+}
+```
+
+```{r}
+## Round 1 -----------------------------------------------------------------------------------------------------
+## Perform Quantile Sweep for 8.5wk
+bar.table.full.8wk <- bar_table_8_5wk[,1:24]
+good.bars <- paste("Bar",9:16,sep="")  # Barcodes 1-8, and 17-24 were not used nor detected
+bar_table_8_5wk <- bar.table.full.8wk[, good.bars]  # Remove missing bars and summary columns
+bar.table_sweep.list <- list()
+n <- 0
+for (q in seq(0.01, 0.99, by=0.02)) {
+  print(q)
+  n <- n + 1
+  bar.table_sweep.list[[n]] <- classifyCells(bar_table_8_5wk, q=q)
+  names(bar.table_sweep.list)[n] <- paste("q=",q,sep="")
+}
+
+## Identify ideal inter-maxima quantile to set barcode-specific thresholds
+threshold.results1 <- findThresh(call.list=bar.table_sweep.list)
+ggplot(data=threshold.results1$res, aes(x=q, y=Proportion, color=Subset)) + geom_line() + theme(legend.position = "none") +
+  geom_vline(xintercept=threshold.results1$extrema, lty=2) + scale_color_manual(values=c("red","black","blue"))
+```
+
+```{r}
+## Finalize round 1 classifications, remove negative cells
+round1.calls <- classifyCells(bar_table_8_5wk, q=findQ(threshold.results1$res, threshold.results1$extrema))
+neg.cells <- names(round1.calls)[which(round1.calls == "Negative")]
+bar_table_8_5wk.rd1 <- bar_table_8_5wk[-which(rownames(bar_table_8_5wk) %in% neg.cells), ]
+
+neg.cells %>% length() # 4291 negative cells, seems high but maybe not looking at the huge cluster in the center of the tSNE
+round1.calls %>% length() # 15496 cells got a call
+bar_table_8_5wk.rd1 # 11,205 + 4291 = 15496 all accounted for
+```
+
+```{r}
+## Round 2 -----------------------------------------------------------------------------------------------------
+bar.table_sweep.list2 <- list()
+n <- 0
+for (q in seq(0.01, 0.99, by=0.02)) {
+  print(q)
+  n <- n + 1
+  bar.table_sweep.list2[[n]] <- classifyCells(bar_table_8_5wk.rd1, q=q)
+  names(bar.table_sweep.list2)[n] <- paste("q=",q,sep="")
+}
+
+threshold.results2 <- findThresh(call.list=bar.table_sweep.list2)
+round2.calls <- classifyCells(bar_table_8_5wk.rd1, q=findQ(threshold.results2$res, threshold.results2$extrema))
+neg.cells2 <- names(round2.calls)[which(round2.calls == "Negative")]
+bar_table_8_5wk.rd2 <- bar_table_8_5wk.rd1[-which(rownames(bar_table_8_5wk.rd1) %in% neg.cells2), ]
+
+neg.cells2 %>% length() # only 69 additional negatives found
+bar_table_8_5wk.rd2 # 11,136
+```
+
+```{r}
+## Round 3  
+bar.table_sweep.list3 <- list()
+n <- 0
+for (q in seq(0.01, 0.99, by=0.02)) {
+  print(q)
+  n <- n + 1
+  bar.table_sweep.list3[[n]] <- classifyCells(bar_table_8_5wk.rd2, q=q)
+  names(bar.table_sweep.list3)[n] <- paste("q=",q,sep="")
+}
+
+threshold.results3 <- findThresh(call.list=bar.table_sweep.list3)
+
+ggplot(data=threshold.results3$res, aes(x=q, y=Proportion, color=Subset)) + geom_line() + theme(legend.position = "none") +
+  geom_vline(xintercept=threshold.results3$extrema, lty=2) + scale_color_manual(values=c("red","black","blue"))
+
+round3.calls <- classifyCells(bar_table_8_5wk.rd2, q=findQ(threshold.results3$res, threshold.results3$extrema))
+neg.cells3 <- names(round3.calls)[which(round3.calls == "Negative")]
+neg.cells3 #%>% length() # showing 9 final negatives
+
+# inspect final negatives
+bar_table_8_5wk.rd2[which(rownames(bar_table_8_5wk.rd2) %in% neg.cells3), ] 
+round2.calls[which(rownames(bar_table_8_5wk.rd2) %in% neg.cells3)] # all were called in rd2 as positives
+```
+
+```{r}
+# Finalize calls from round 3 
+
+final.calls.8.5wk <- c(round3.calls, rep("Negative",(length(neg.cells2)+length(neg.cells))))
+final.calls.8.5wk %>% typeof()
+
+sort(final.calls.8.5wk, decreasing = TRUE)
+names(final.calls.8.5wk) <- c(names(round3.calls),neg.cells2,neg.cells)
+final.calls.8.5wk %>% length() # 15496
+
+saveRDS(final.calls.8.5wk, file = "MULTIseq-8wk-final-calls.rds")
+write.csv(final.calls.8.5wk, file = "MULTIseq-8wk-final-calls.csv")
+```
+
+Use MULTIseq calls to filter and annotate Seurat object
+
+```{r}
+devtools::install_github("bmewing/mgsub")
+library(mgsub)
+```
+
+```{r}
+# Try to add final.calls to metadata
+# Changing bar names to match genotypes using export to excel and find/replace
+final.calls.8.5wk
+
+final.calls.8wk.animal <- mgsub(final.calls.8.5wk, pattern = c("Bar9", "Bar10", "Bar11", "Bar12", "Bar13", "Bar14", "Bar15", "Bar16"), replacement = c("WT_M1_8wk", "SCA7_M1_8wk", "WT_F1_8wk", "SCA7_F1_8wk", "WT_M2_8wk", "SCA7_M2_8wk", "WT_F2_8wk", "SCA7_F2_8wk"))
+final.calls.8.5wk.animal
+
+final.calls.8.5wk.type <- mgsub(final.calls.8.5wk, pattern = c("WT_M1_8wk", "SCA7_M1_8wk", "WT_F1_8wk", "SCA7_F1_8wk", "WT_M2_8wk", "SCA7_M2_8wk", "WT_F2_8wk", "SCA7_F2_8wk"), replacement = c("WT", "SCA7", "WT", "SCA7", "WT", "SCA7", "WT", "SCA7"))
+
+final.calls.8.5wk.sex <- mgsub(final.calls.8.5wk, pattern = c("WT_M1_8wk", "SCA7_M1_8wk", "WT_F1_8wk", "SCA7_F1_8wk", "WT_M2_8wk", "SCA7_M2_8wk", "WT_F2_8wk", "SCA7_F2_8wk"), replacement = c("Male", "Male", "Female", "Female", "Male", "Male", "Female", "Female"))
+
+```
+
+```{r}
+# Using built in AddMetaData function test on duplicated object first
+SCA7.8wk.unfiltered.test <- SCA7.8wk.unfiltered
+SCA7.8wk.unfiltered.test <- AddMetaData(object = SCA7.8wk.unfiltered.test, metadata = final.calls.8.5wk, col.name = 'MULTIseq_group')
+
+SCA7.8wk.unfiltered.test@meta.data # Looks good!
+
+#Modifying real deal
+SCA7.8wk.unfiltered <- AddMetaData(object = SCA7.8wk.unfiltered, metadata = final.calls.8.5wk, col.name = 'MULTIseq_group')
+SCA7.8wk.unfiltered <- AddMetaData(object = SCA7.8wk.unfiltered, metadata = final.calls.8.5wk.type, col.name = 'Type')
+SCA7.8wk.unfiltered <- AddMetaData(object = SCA7.8wk.unfiltered, metadata = final.calls.8.5wk.sex, col.name = 'sex')
+
+SCA7.8wk.unfiltered@meta.data # Looks good!
+table(SCA7.8wk.unfiltered@meta.data$MULTIseq_group)
+```
+
+```{r}
+# Remove doublets and NAs
+SCA7.8wk.nodubs <- subset(SCA7.8wk.unfiltered, subset = MULTIseq_group != "Doublet")
+SCA7.8wk.nodubs@meta.data
+```
+
+```{r}
+# normalize, find variable features, and scale data on no doublet object
+SCA7.8wk.nodubs <- NormalizeData(SCA7.8wk.nodubs, normalization.method = "LogNormalize", scale.factor = 10000)
+SCA7.8wk.nodubs <- FindVariableFeatures(SCA7.8wk.nodubs, selection.method = "vst", nfeatures = 3000)
+
+all.genes <- rownames(SCA7.8wk.nodubs)
+SCA7.8wk.nodubs <- ScaleData(SCA7.8wk.nodubs, features = all.genes)
+```
+
+```{r}
+# run PCA
+SCA7.8wk.nodubs <- RunPCA(SCA7.8wk.nodubs, features = VariableFeatures(object = SCA7.8wk.nodubs))
+```
+
+```{r}
+# run JackStraw to visualize PC significance
+SCA7.8wk.nodubs <- JackStraw(SCA7.8wk.nodubs, num.replicate = 100)
+SCA7.8wk.nodubs <- ScoreJackStraw(SCA7.8wk.nodubs, dims = 1:20)
+```
+
+```{r}
+JackStrawPlot(SCA7.8wk.nodubs, dims = 1:20)
+```
+
+```{r}
+# view elbow plot to select number of PCs to include for clustering
+ElbowPlot(SCA7.8wk.nodubs)
+```
+
+```{r}
+# cluster with 17 PCs
+SCA7.8wk.nodubs <- FindNeighbors(SCA7.8wk.nodubs, dims = 1:17)
+SCA7.8wk.nodubs <- FindClusters(SCA7.8wk.nodubs, resolution =0.8)
+SCA7.8wk.nodubs <- RunUMAP(SCA7.8wk.nodubs, dims = 1:17)
+```
+
+```{r}
+# visualize UMAP
+DimPlot(SCA7.8wk.nodubs, reduction = "umap")
+DimPlot(SCA7.8wk.nodubs, reduction = "umap", label = TRUE, group.by = 'Type')
+DimPlot(SCA7.8wk.nodubs, reduction = "umap", label = TRUE, group.by = 'MULTIseq_group')
+```
+
+```{r}
+# save object
+saveRDS(SCA7.8wk.nodubs, file = "~/Seurat-Analysis-Path/SCA7.8wk.nodubs.rds")
+```
+
+Find Cluster Markers and Annotate Cell Types
+
+```{r}
+# Cluster Markers and Identities 
+cluster.markers.8wk <- FindAllMarkers(SCA7.8wk.nodubs, only.pos = TRUE, min.pct = 0.2, logfc.threshold = 0.5)
+
+# add specificity metric and investigate top markers
+cluster.markers.8wk <- mutate(cluster.markers.8wk, specificity = pct.1 - pct.2) %>% arrange(-specificity)
+cluster.markers.8wk[cluster.markers.8wk$cluster==11,]
+cluster.markers.8wk[cluster.markers.8wk$cluster==9,]$gene
+cluster.markers.8wk[cluster.markers.8wk$cluster==9,] %>% arrange(-avg_logFC)
+
+# compare cluster markers to reference datasets to identify cell types
+```
+
+```{r}
+# I often find a single cluster with no strong markers and very low read counts
+# this cluster is debris or dead cells and should be removed
+# in this case it was cluster 2
+cluster.markers.8wk[cluster.markers.8wk$cluster==2,]
+
+# remove debris cluster
+SCA7.8wk.cleaned <- subset(SCA7.8wk.nodubs, subset = seurat_clusters != "2")
+```
+
+```{r}
+# after debris removed, and each cluster has a cell type identity, we can annotate clusters with names
+# Re-name Cluster IDs, ordered by cluster number
+new.cluster.ids.8wk <- c("Astrocytes","Purkinje cells","Golgi cells","Purkinje cells", "Purkinje cells","Granule neurons","Purkinje cells","Purkinje cells", "MLI", "Bergmann Glia", "Purkinje cells", "PLI", "Oligodendrocytes", "Fibroblasts","Endothelial Stalk","Fibroblasts","Endothelial Mural","Choroid","Ependymal")
+
+names(new.cluster.ids.8wk) <- levels(SCA7.8wk.cleaned)
+
+SCA7.8wk.cleaned <- RenameIdents(SCA7.8wk.cleaned, new.cluster.ids.8wk)
+```
+
+```{r}
+# view final annotated object
+DimPlot(SCA7.8wk.cleaned, label=T)
+```
